@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_object_detection/google_mlkit_object_detection.dart';
+import 'package:image/image.dart' as img;
 import 'dart:async';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
+import 'package:flutter/services.dart';
 
 late List<CameraDescription> cameras;
 
@@ -43,20 +45,24 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen> {
     super.initState();
     _initializeCamera();
     _initializeDetector();
+    _testObjectDetection(); // Testing with a sample image
   }
 
-  void _initializeCamera() {
+  void _initializeCamera() async {
     _cameraController = CameraController(
       cameras[0],
-      ResolutionPreset.medium,
+      ResolutionPreset.high,
       enableAudio: false,
     );
 
-    _cameraController.initialize().then((_) {
-      if (!mounted) return;
-      setState(() {});
-      _startDetection();
-    });
+    await _cameraController.initialize();
+    if (!mounted) return;
+
+    print(
+      "Camera Initialized: Resolution - ${_cameraController.value.previewSize}",
+    );
+    setState(() {});
+    _startDetection();
   }
 
   void _initializeDetector() {
@@ -66,6 +72,7 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen> {
       multipleObjects: true,
     );
     _objectDetector = ObjectDetector(options: options);
+    print("Object Detector Initialized Successfully");
   }
 
   void _startDetection() {
@@ -74,8 +81,8 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen> {
       _isDetecting = true;
 
       try {
-        final file = await _convertImage(image);
-        final inputImage = InputImage.fromFile(file);
+        print("Processing image...");
+        final inputImage = await _convertCameraImage(image);
         final objects = await _objectDetector.processImage(inputImage);
 
         if (mounted) {
@@ -83,20 +90,113 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen> {
             _detectedObjects = objects;
           });
         }
+
+        if (objects.isEmpty) {
+          print("No objects detected.");
+        } else {
+          print("Objects detected: ${objects.length}");
+          for (var obj in objects) {
+            print(
+              "Detected Object: ${obj.labels.isNotEmpty ? obj.labels.first.text : "Unknown"}",
+            );
+          }
+        }
       } catch (e) {
-        debugPrint("Error detecting objects: $e");
+        print("Error detecting objects: $e");
       }
 
       _isDetecting = false;
     });
   }
 
-  Future<File> _convertImage(CameraImage image) async {
-    final tempDir = await getTemporaryDirectory();
-    final filePath = '${tempDir.path}/frame.jpg';
-    final file = File(filePath);
-    await file.writeAsBytes(image.planes[0].bytes);
-    return file;
+  Future<InputImage> _convertCameraImage(CameraImage image) async {
+    print(
+      "Converting Camera Image - Format: ${image.format.group}, Width: ${image.width}, Height: ${image.height}",
+    );
+
+    try {
+      final Directory tempDir = await getTemporaryDirectory();
+      final String tempPath = '${tempDir.path}/frame.jpg';
+      final File file = File(tempPath);
+
+      // Convert YUV420 image to JPEG
+      final Uint8List bytes = _convertYUV420ToJPEG(image);
+      await file.writeAsBytes(bytes);
+
+      print("Image successfully converted to JPEG: $tempPath");
+
+      return InputImage.fromFilePath(tempPath);
+    } catch (e) {
+      print("Error converting image: $e");
+      throw Exception("Failed to convert image");
+    }
+  }
+
+  Uint8List _convertYUV420ToJPEG(CameraImage image) {
+    final int width = image.width;
+    final int height = image.height;
+
+    // Fix: Use correct Image constructor
+    img.Image rgbImage = img.Image(width: width, height: height);
+
+    final int uvRowStride = image.planes[1].bytesPerRow;
+    final int uvPixelStride = image.planes[1].bytesPerPixel ?? 1;
+
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
+        final int uvIndex = uvPixelStride * (x ~/ 2) + uvRowStride * (y ~/ 2);
+
+        final int yp =
+            image.planes[0].bytes[y * image.planes[0].bytesPerRow + x];
+        final int up = image.planes[1].bytes[uvIndex];
+        final int vp = image.planes[2].bytes[uvIndex];
+
+        int r = (yp + 1.370705 * (vp - 128)).toInt();
+        int g = (yp - 0.698001 * (vp - 128) - 0.337633 * (up - 128)).toInt();
+        int b = (yp + 1.732446 * (up - 128)).toInt();
+
+        // Fix: Add alpha (opacity) value = 255 (fully opaque)
+        rgbImage.setPixelRgba(x, y, r, g, b, 255);
+      }
+    }
+
+    // Convert to JPEG format
+    return Uint8List.fromList(img.encodeJpg(rgbImage));
+  }
+
+  void _testObjectDetection() async {
+    try {
+      // Load asset as byte data
+      final ByteData data = await rootBundle.load('assets/sample.png');
+      final Uint8List bytes = data.buffer.asUint8List();
+
+      // Get temporary directory to store the image
+      final tempDir = await getTemporaryDirectory();
+      final file = File('${tempDir.path}/sample.png');
+
+      // Write the asset bytes to a file
+      await file.writeAsBytes(bytes);
+
+      // Create InputImage from the file
+      final inputImage = InputImage.fromFilePath(file.path);
+      print("Image loaded successfully: ${file.path}");
+
+      // Run object detection
+      final objects = await _objectDetector.processImage(inputImage);
+
+      if (objects.isEmpty) {
+        print("No objects detected in sample image.");
+      } else {
+        print("Objects detected in sample image: ${objects.length}");
+        for (var obj in objects) {
+          print(
+            "Detected Object: ${obj.labels.isNotEmpty ? obj.labels.first.text : "Unknown"}",
+          );
+        }
+      }
+    } catch (e) {
+      print("Error loading image: $e");
+    }
   }
 
   @override
